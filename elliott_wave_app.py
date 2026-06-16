@@ -136,12 +136,11 @@ def load_price_data(code, start, end):
                                  '종가': 'Close', '거래량': 'Volume'})
         df.index = pd.to_datetime(df.index)
     elif '/' not in code:
-        # 미국 주식 — yfinance
-        import yfinance as yf
-        ticker = yf.Ticker(code.upper())
-        df = ticker.history(start=start, end=end, auto_adjust=True)
-        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-        df.index = pd.to_datetime(df.index).tz_localize(None)
+        # 미국 주식 — FinanceDataReader (Yahoo Finance 경유)
+        df = fdr.DataReader(code.upper(), start, end)
+        df.index = pd.to_datetime(df.index)
+        if 'Close' not in df.columns and 'Adj Close' in df.columns:
+            df = df.rename(columns={'Adj Close': 'Close'})
     else:
         # 코인 — FinanceDataReader
         df = fdr.DataReader(code, start, end)
