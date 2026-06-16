@@ -1,3 +1,10 @@
+import sys, subprocess
+try:
+    import pkg_resources
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "setuptools"], check=True)
+    import pkg_resources
+
 import streamlit as st
 import pandas as pd
 import numpy as np
