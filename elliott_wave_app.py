@@ -1,14 +1,3 @@
-import sys, types
-try:
-    import pkg_resources
-except ImportError:
-    # pkg_resources(setuptools) 없는 환경 대응 — 가짜 모듈로 대체
-    _fake = types.ModuleType("pkg_resources")
-    _fake.get_distribution = lambda x: types.SimpleNamespace(version="0.0.0")
-    _fake.DistributionNotFound = Exception
-    _fake.require = lambda *a, **kw: None
-    sys.modules["pkg_resources"] = _fake
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -136,16 +125,17 @@ def find_stock_code(query, stock_df):
 
 @st.cache_data(ttl=600)
 def load_price_data(code, start, end):
-    # 한국 주식(6자리 숫자)은 pykrx 사용 — Streamlit Cloud에서도 안정적
     if code.isdigit() and len(code) == 6:
-        # 한국 주식 — pykrx (KRX 직접 접근)
-        from pykrx import stock as krx
-        s = start.replace('-', '')
-        e = end.replace('-', '')
-        df = krx.get_market_ohlcv_by_date(s, e, code)
-        df = df.rename(columns={'시가': 'Open', '고가': 'High', '저가': 'Low',
-                                 '종가': 'Close', '거래량': 'Volume'})
-        df.index = pd.to_datetime(df.index)
+        # 한국 주식 — yfinance (.KS/.KQ 자동 시도)
+        import yfinance as yf
+        df = pd.DataFrame()
+        for suffix in ['.KS', '.KQ']:
+            t = yf.Ticker(code + suffix)
+            tmp = t.history(start=start, end=end, auto_adjust=True)
+            if not tmp.empty:
+                df = tmp[['Open', 'High', 'Low', 'Close', 'Volume']]
+                df.index = pd.to_datetime(df.index).tz_localize(None)
+                break
     elif '/' not in code:
         # 미국 주식 — FinanceDataReader (Yahoo Finance 경유)
         df = fdr.DataReader(code.upper(), start, end)
@@ -532,18 +522,9 @@ with tab_wave:
                     stock_df = load_stock_list()
                     code, name = find_stock_code(query, stock_df)
                     if not (code.isdigit() and len(code) == 6):
-                        # pykrx로 직접 검색 시도
-                        from pykrx import stock as krx
-                        today_str = end_date.strftime('%Y%m%d')
-                        all_codes = krx.get_market_ticker_list(today_str, market="ALL")
-                        matched = [(c, krx.get_market_ticker_name(c)) for c in all_codes
-                                   if query in krx.get_market_ticker_name(c)]
-                        if matched:
-                            code, name = matched[0]
-                        else:
-                            st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
-                                     "6자리 종목코드를 직접 입력해보세요. (예: 059090)")
-                            st.stop()
+                        st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
+                                 "6자리 종목코드를 직접 입력해보세요. (예: 005930)")
+                        st.stop()
                     df_full = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                              end_date.strftime('%Y-%m-%d'))
                     title = f"{name} ({code})"
@@ -1158,17 +1139,9 @@ with tab_signal:
                     stock_df = load_stock_list()
                     code, name = find_stock_code(query, stock_df)
                     if not (code.isdigit() and len(code) == 6):
-                        from pykrx import stock as krx
-                        today_str = end_date.strftime('%Y%m%d')
-                        all_codes = krx.get_market_ticker_list(today_str, market="ALL")
-                        matched = [(c, krx.get_market_ticker_name(c)) for c in all_codes
-                                   if query in krx.get_market_ticker_name(c)]
-                        if matched:
-                            code, name = matched[0]
-                        else:
-                            st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
-                                     "6자리 종목코드를 직접 입력해보세요.")
-                            st.stop()
+                        st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
+                                 "6자리 종목코드를 직접 입력해보세요.")
+                        st.stop()
                     df_s = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                            end_date.strftime('%Y-%m-%d'))
                     sig_title = f"{name} ({code})"
