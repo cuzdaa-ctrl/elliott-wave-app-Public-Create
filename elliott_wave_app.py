@@ -1,9 +1,13 @@
-import sys, subprocess
+import sys, types
 try:
     import pkg_resources
 except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "setuptools"], check=True)
-    import pkg_resources
+    # pkg_resources(setuptools) 없는 환경 대응 — 가짜 모듈로 대체
+    _fake = types.ModuleType("pkg_resources")
+    _fake.get_distribution = lambda x: types.SimpleNamespace(version="0.0.0")
+    _fake.DistributionNotFound = Exception
+    _fake.require = lambda *a, **kw: None
+    sys.modules["pkg_resources"] = _fake
 
 import streamlit as st
 import pandas as pd
