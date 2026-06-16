@@ -127,6 +127,7 @@ def find_stock_code(query, stock_df):
 def load_price_data(code, start, end):
     # 한국 주식(6자리 숫자)은 pykrx 사용 — Streamlit Cloud에서도 안정적
     if code.isdigit() and len(code) == 6:
+        # 한국 주식 — pykrx (KRX 직접 접근)
         from pykrx import stock as krx
         s = start.replace('-', '')
         e = end.replace('-', '')
@@ -134,8 +135,15 @@ def load_price_data(code, start, end):
         df = df.rename(columns={'시가': 'Open', '고가': 'High', '저가': 'Low',
                                  '종가': 'Close', '거래량': 'Volume'})
         df.index = pd.to_datetime(df.index)
+    elif '/' not in code:
+        # 미국 주식 — yfinance
+        import yfinance as yf
+        ticker = yf.Ticker(code.upper())
+        df = ticker.history(start=start, end=end, auto_adjust=True)
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        df.index = pd.to_datetime(df.index).tz_localize(None)
     else:
-        # 코인 등 나머지는 FinanceDataReader
+        # 코인 — FinanceDataReader
         df = fdr.DataReader(code, start, end)
         df.index = pd.to_datetime(df.index)
     df = df.dropna(subset=['Close'])
@@ -387,43 +395,58 @@ def fetch_coingecko(coin_id: str):
 # ─── 펀더멘털 데이터 (Naver 스크래핑 + yfinance) ─────────────────────────────
 
 @st.cache_data(ttl=3600)
-def fetch_fundamental(code: str) -> dict:
-    """PER / PBR (Naver 스크래핑) + 기관보유율 (yfinance) — 한국 주식 전용"""
-    if not (code.isdigit() and len(code) == 6):
-        return {}
-    import re
+def fetch_fundamental(code: str, market: str = "한국 주식") -> dict:
+    """
+    한국 주식: PER/PBR (Naver 스크래핑) + 기관보유율 (yfinance)
+    미국 주식: trailingPE / shortRatio / 기관보유율 (yfinance)
+    """
+    import re, yfinance as yf
     result = {}
-    h = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://finance.naver.com/',
-        'Accept-Language': 'ko-KR,ko;q=0.9',
-    }
 
-    # PER / PBR — Naver Finance 메인 페이지 스크래핑
-    try:
-        r = requests.get(
-            f'https://finance.naver.com/item/main.naver?code={code}',
-            headers=h, timeout=8
-        )
-        r.encoding = 'euc-kr'
-        text = r.text
-        per_m = re.search(r'PER[^0-9]*([0-9]+\.[0-9]+)', text)
-        pbr_m = re.search(r'PBR[^0-9]*([0-9]+\.[0-9]+)', text)
-        result['per'] = float(per_m.group(1)) if per_m else None
-        result['pbr'] = float(pbr_m.group(1)) if pbr_m else None
-    except Exception:
-        result['per'] = None
-        result['pbr'] = None
+    if market == "한국 주식" and code.isdigit() and len(code) == 6:
+        h = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://finance.naver.com/',
+            'Accept-Language': 'ko-KR,ko;q=0.9',
+        }
+        try:
+            r = requests.get(
+                f'https://finance.naver.com/item/main.naver?code={code}',
+                headers=h, timeout=8
+            )
+            r.encoding = 'euc-kr'
+            text = r.text
+            per_m = re.search(r'PER[^0-9]*([0-9]+\.[0-9]+)', text)
+            pbr_m = re.search(r'PBR[^0-9]*([0-9]+\.[0-9]+)', text)
+            result['per'] = float(per_m.group(1)) if per_m else None
+            result['pbr'] = float(pbr_m.group(1)) if pbr_m else None
+        except Exception:
+            result['per'] = None
+            result['pbr'] = None
 
-    # 기관 보유율 — yfinance (heldPercentInstitutions)
-    try:
-        import yfinance as yf
-        t = yf.Ticker(f'{code}.KS')
-        info = t.info
-        val = info.get('heldPercentInstitutions')
-        result['institutional_hold'] = float(val) if val is not None else None
-    except Exception:
-        result['institutional_hold'] = None
+        try:
+            t = yf.Ticker(f'{code}.KS')
+            info = t.info
+            val = info.get('heldPercentInstitutions')
+            result['institutional_hold'] = float(val) if val is not None else None
+        except Exception:
+            result['institutional_hold'] = None
+
+    elif market == "미국 주식":
+        try:
+            t = yf.Ticker(code.upper())
+            info = t.info
+            result['per'] = info.get('trailingPE') or info.get('forwardPE')
+            result['pbr'] = info.get('priceToBook')
+            result['institutional_hold'] = info.get('heldPercentInstitutions')
+            result['short_ratio'] = info.get('shortRatio')  # days to cover
+            result['dividend_yield'] = info.get('dividendYield')
+        except Exception:
+            result['per'] = None
+            result['pbr'] = None
+            result['institutional_hold'] = None
+            result['short_ratio'] = None
+            result['dividend_yield'] = None
 
     return result
 
@@ -431,10 +454,13 @@ def fetch_fundamental(code: str) -> dict:
 with st.sidebar:
     st.header("⚙️ 분석 설정")
 
-    market = st.radio("시장 선택", ["한국 주식", "암호화폐"], horizontal=True)
+    market = st.radio("시장 선택", ["한국 주식", "미국 주식", "암호화폐"], horizontal=True)
     if market == "한국 주식":
         query = st.text_input("종목명 또는 코드", value="삼성전자",
                               placeholder="예: 삼성전자 또는 005930")
+    elif market == "미국 주식":
+        query = st.text_input("티커 심볼", value="AAPL",
+                              placeholder="예: AAPL, TSLA, NVDA, MSFT").upper().strip()
     else:
         crypto_list = load_crypto_list()
         crypto_options = [f"{v} ({k})" for k, v in crypto_list.items()]
@@ -498,6 +524,11 @@ with tab_wave:
                     df_full = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                              end_date.strftime('%Y-%m-%d'))
                     title = f"{name} ({code})"
+                elif market == "미국 주식":
+                    code = query.upper().strip()
+                    df_full = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
+                                             end_date.strftime('%Y-%m-%d'))
+                    title = code
                 else:
                     code = query
                     df_full = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
@@ -789,7 +820,9 @@ with tab_wave:
         # ── 분석 결과 패널 ────────────────────────────────────────────────
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("현재가", f"{current_price:,.0f}" + ("원" if market == "한국 주식" else ""))
+            price_unit = "원" if market == "한국 주식" else ("$" if market == "미국 주식" else "")
+            price_fmt = f"${current_price:,.2f}" if market == "미국 주식" else f"{current_price:,.0f}{price_unit}"
+            st.metric("현재가", price_fmt)
             rsi_now = rsi.iloc[-1]
             rsi_status = "과매수 🔴" if rsi_now >= 70 else ("과매도 🟢" if rsi_now <= 30 else "중립 ⚪")
             st.metric("RSI(14)", f"{rsi_now:.1f}", rsi_status)
@@ -830,11 +863,11 @@ with tab_wave:
         st.markdown("---")
         st.subheader("🔎 펀더멘털 체크")
 
-        if market != "한국 주식":
-            st.info("펀더멘털 체크는 한국 주식만 지원합니다.")
+        if market == "암호화폐":
+            st.info("펀더멘털 체크는 주식만 지원합니다.")
         else:
             with st.spinner("펀더멘털 데이터 조회 중..."):
-                fd = fetch_fundamental(code)
+                fd = fetch_fundamental(code, market)
 
             def fund_chip(label, value_str, status_color, comment):
                 bg  = {'green': '#002211', 'yellow': '#1f1800', 'red': '#2d0000', 'gray': '#1a1a1a'}[status_color]
@@ -850,44 +883,59 @@ with tab_wave:
             green_count = 0
             red_count   = 0
 
-            # PER
+            # PER (한국/미국 공통)
             per = fd.get('per')
+            per_label = "PER (주가수익비율)"
             if per is None:
-                with fc1: st.markdown(fund_chip("PER (주가수익비율)", "조회 불가", "gray", "Naver 데이터 없음"), unsafe_allow_html=True)
+                with fc1: st.markdown(fund_chip(per_label, "조회 불가", "gray", "데이터 없음"), unsafe_allow_html=True)
             elif per <= 15:
                 green_count += 1
-                with fc1: st.markdown(fund_chip("PER (주가수익비율)", f"{per:.1f}배", "green", "✅ 저평가 구간 (≤15)"), unsafe_allow_html=True)
+                with fc1: st.markdown(fund_chip(per_label, f"{per:.1f}배", "green", "✅ 저평가 구간 (≤15)"), unsafe_allow_html=True)
             elif per <= 25:
-                with fc1: st.markdown(fund_chip("PER (주가수익비율)", f"{per:.1f}배", "yellow", "⚠️ 적정 수준 (15~25)"), unsafe_allow_html=True)
+                with fc1: st.markdown(fund_chip(per_label, f"{per:.1f}배", "yellow", "⚠️ 적정 수준 (15~25)"), unsafe_allow_html=True)
             else:
                 red_count += 1
-                with fc1: st.markdown(fund_chip("PER (주가수익비율)", f"{per:.1f}배", "red", "🚫 고평가 구간 (>25)"), unsafe_allow_html=True)
+                with fc1: st.markdown(fund_chip(per_label, f"{per:.1f}배", "red", "🚫 고평가 구간 (>25)"), unsafe_allow_html=True)
 
-            # PBR
+            # PBR (한국/미국 공통)
             pbr = fd.get('pbr')
+            pbr_label = "PBR (주가순자산비율)"
             if pbr is None:
-                with fc2: st.markdown(fund_chip("PBR (주가순자산비율)", "조회 불가", "gray", "Naver 데이터 없음"), unsafe_allow_html=True)
+                with fc2: st.markdown(fund_chip(pbr_label, "조회 불가", "gray", "데이터 없음"), unsafe_allow_html=True)
             elif pbr <= 1.0:
                 green_count += 1
-                with fc2: st.markdown(fund_chip("PBR (주가순자산비율)", f"{pbr:.2f}배", "green", "✅ 자산가치 이하 (≤1.0)"), unsafe_allow_html=True)
+                with fc2: st.markdown(fund_chip(pbr_label, f"{pbr:.2f}배", "green", "✅ 자산가치 이하 (≤1.0)"), unsafe_allow_html=True)
             elif pbr <= 2.0:
-                with fc2: st.markdown(fund_chip("PBR (주가순자산비율)", f"{pbr:.2f}배", "yellow", "⚠️ 적정 수준 (1~2)"), unsafe_allow_html=True)
+                with fc2: st.markdown(fund_chip(pbr_label, f"{pbr:.2f}배", "yellow", "⚠️ 적정 수준 (1~2)"), unsafe_allow_html=True)
             else:
                 red_count += 1
-                with fc2: st.markdown(fund_chip("PBR (주가순자산비율)", f"{pbr:.2f}배", "red", "🚫 고평가 (>2.0)"), unsafe_allow_html=True)
+                with fc2: st.markdown(fund_chip(pbr_label, f"{pbr:.2f}배", "red", "🚫 고평가 (>2.0)"), unsafe_allow_html=True)
 
-            # 기관 보유율
-            ih = fd.get('institutional_hold')
-            if ih is None:
-                with fc3: st.markdown(fund_chip("기관 보유율", "조회 불가", "gray", "yfinance 데이터 없음"), unsafe_allow_html=True)
-            elif ih >= 0.30:
-                green_count += 1
-                with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "green", "✅ 기관 비중 높음 (≥30%)"), unsafe_allow_html=True)
-            elif ih >= 0.15:
-                with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "yellow", "⚠️ 기관 비중 보통 (15~30%)"), unsafe_allow_html=True)
+            # 세 번째 카드: 미국은 공매도 커버일수, 한국은 기관보유율
+            if market == "미국 주식":
+                sr = fd.get('short_ratio')
+                if sr is None:
+                    with fc3: st.markdown(fund_chip("공매도 커버일수 (Short Ratio)", "조회 불가", "gray", "데이터 없음"), unsafe_allow_html=True)
+                elif sr <= 3:
+                    green_count += 1
+                    with fc3: st.markdown(fund_chip("공매도 커버일수 (Short Ratio)", f"{sr:.1f}일", "green", "✅ 공매도 압력 낮음 (≤3일)"), unsafe_allow_html=True)
+                elif sr <= 7:
+                    with fc3: st.markdown(fund_chip("공매도 커버일수 (Short Ratio)", f"{sr:.1f}일", "yellow", "⚠️ 보통 수준 (3~7일)"), unsafe_allow_html=True)
+                else:
+                    red_count += 1
+                    with fc3: st.markdown(fund_chip("공매도 커버일수 (Short Ratio)", f"{sr:.1f}일", "red", "🚫 공매도 압력 높음 (>7일)"), unsafe_allow_html=True)
             else:
-                red_count += 1
-                with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "red", "🚫 기관 비중 낮음 (<15%)"), unsafe_allow_html=True)
+                ih = fd.get('institutional_hold')
+                if ih is None:
+                    with fc3: st.markdown(fund_chip("기관 보유율", "조회 불가", "gray", "데이터 없음"), unsafe_allow_html=True)
+                elif ih >= 0.30:
+                    green_count += 1
+                    with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "green", "✅ 기관 비중 높음 (≥30%)"), unsafe_allow_html=True)
+                elif ih >= 0.15:
+                    with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "yellow", "⚠️ 기관 비중 보통 (15~30%)"), unsafe_allow_html=True)
+                else:
+                    red_count += 1
+                    with fc3: st.markdown(fund_chip("기관 보유율", f"{ih*100:.1f}%", "red", "🚫 기관 비중 낮음 (<15%)"), unsafe_allow_html=True)
 
             # 종합 판정
             st.markdown("<div style='margin-top:14px;'>", unsafe_allow_html=True)
@@ -899,7 +947,10 @@ with tab_wave:
                 st.warning("⚠️ 혼조 — 추가 확인 후 판단하세요.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-            st.caption("PER·PBR: Naver Finance 실시간 스크래핑 | 기관보유율: yfinance (분기 공시 기준) | 중장기 참고용")
+            if market == "미국 주식":
+                st.caption("PER·PBR·공매도: yfinance (Yahoo Finance 기준) | 중장기 참고용")
+            else:
+                st.caption("PER·PBR: Naver Finance 실시간 스크래핑 | 기관보유율: yfinance (분기 공시 기준) | 중장기 참고용")
 
     else:
         st.info("👈 사이드바에서 설정 후 **분석 시작**을 클릭하세요.")
@@ -1086,6 +1137,11 @@ with tab_signal:
                     df_s = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                            end_date.strftime('%Y-%m-%d'))
                     sig_title = f"{name} ({code})"
+                elif market == "미국 주식":
+                    code = query.upper().strip()
+                    df_s = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
+                                           end_date.strftime('%Y-%m-%d'))
+                    sig_title = code
                 else:
                     code  = query
                     df_s  = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
@@ -1101,7 +1157,7 @@ with tab_signal:
         s = get_signal_data(df_s)
         v = calc_verdict(s)
         cur      = s['cur']
-        unit_str = "원" if market == "한국 주식" else ""
+        unit_str = "원" if market == "한국 주식" else ("$" if market == "미국 주식" else "")
 
         # ── 종합 판정 박스 ─────────────────────────────────────────────────
         st.markdown(f"## {sig_title} 종합 매매 판단")
@@ -1395,6 +1451,67 @@ with tab_signal:
                 else:
                     st.info("실적 데이터를 가져오지 못했습니다. 네이버 금융에서 직접 확인해주세요.")
                 st.markdown(f"[🔗 네이버 금융 바로가기](https://finance.naver.com/item/main.naver?code={code})")
+
+        elif market == "미국 주식":
+            # ── 미국 주식 — yfinance 뉴스 + 기업 정보 ──────────────────────
+            with st.expander("🏢 기업 정보 & 주요 지표", expanded=True):
+                try:
+                    import yfinance as yf
+                    t = yf.Ticker(code.upper())
+                    info = t.info
+                    long_name   = info.get('longName', code)
+                    sector      = info.get('sector', '—')
+                    industry    = info.get('industry', '—')
+                    country     = info.get('country', '—')
+                    market_cap  = info.get('marketCap')
+                    fwd_pe      = info.get('forwardPE')
+                    div_yield   = info.get('dividendYield')
+                    week52_high = info.get('fiftyTwoWeekHigh')
+                    week52_low  = info.get('fiftyTwoWeekLow')
+                    cur_price   = info.get('currentPrice') or info.get('regularMarketPrice')
+
+                    st.markdown(f"**{long_name}** ({code.upper()})")
+                    st.caption(f"{sector} > {industry} | {country}")
+
+                    mc1, mc2, mc3, mc4 = st.columns(4)
+                    if market_cap:
+                        mc1.metric("시가총액", f"${market_cap/1e9:.1f}B")
+                    if fwd_pe:
+                        mc2.metric("Forward PER", f"{fwd_pe:.1f}배")
+                    if div_yield:
+                        mc3.metric("배당수익률", f"{div_yield*100:.2f}%")
+                    if week52_high and week52_low and cur_price:
+                        pos = (cur_price - week52_low) / (week52_high - week52_low) * 100
+                        mc4.metric("52주 위치", f"{pos:.0f}%",
+                                   help=f"52주 저점 ${week52_low:.2f} ~ 고점 ${week52_high:.2f}")
+                except Exception as e:
+                    st.info(f"기업 정보를 불러오지 못했습니다: {e}")
+
+            with st.expander("📰 최근 뉴스 (Yahoo Finance)", expanded=True):
+                try:
+                    import yfinance as yf
+                    t = yf.Ticker(code.upper())
+                    news_list = t.news or []
+                    if not news_list:
+                        st.info("최근 뉴스가 없습니다.")
+                    else:
+                        for n in news_list[:8]:
+                            title_n  = n.get('title', '')
+                            pub_time = n.get('providerPublishTime', 0)
+                            pub_str  = datetime.fromtimestamp(pub_time).strftime('%Y-%m-%d') if pub_time else ''
+                            pub_name = n.get('publisher', '')
+                            url_n    = n.get('link', '#')
+                            st.markdown(
+                                f"<div style='padding:6px 10px;margin:3px 0;"
+                                f"border-left:3px solid #4488ff;border-radius:4px;"
+                                f"background:rgba(255,255,255,0.03);'>"
+                                f"<span style='color:#888;font-size:0.8em;'>{pub_str} · {pub_name}</span><br>"
+                                f"<a href='{url_n}' target='_blank' style='color:#aaccff;text-decoration:none;'>"
+                                f"{title_n}</a></div>",
+                                unsafe_allow_html=True,
+                            )
+                except Exception:
+                    st.info("뉴스를 불러오지 못했습니다.")
 
         else:
             # ── 코인 — 공포탐욕 + CoinGecko ──────────────────────────────
