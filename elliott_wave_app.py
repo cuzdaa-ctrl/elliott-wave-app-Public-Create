@@ -520,6 +520,19 @@ with tab_wave:
                 if market == "한국 주식":
                     stock_df = load_stock_list()
                     code, name = find_stock_code(query, stock_df)
+                    if not (code.isdigit() and len(code) == 6):
+                        # pykrx로 직접 검색 시도
+                        from pykrx import stock as krx
+                        today_str = end_date.strftime('%Y%m%d')
+                        all_codes = krx.get_market_ticker_list(today_str, market="ALL")
+                        matched = [(c, krx.get_market_ticker_name(c)) for c in all_codes
+                                   if query in krx.get_market_ticker_name(c)]
+                        if matched:
+                            code, name = matched[0]
+                        else:
+                            st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
+                                     "6자리 종목코드를 직접 입력해보세요. (예: 059090)")
+                            st.stop()
                     df_full = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                              end_date.strftime('%Y-%m-%d'))
                     title = f"{name} ({code})"
@@ -1133,6 +1146,18 @@ with tab_signal:
                 if market == "한국 주식":
                     stock_df = load_stock_list()
                     code, name = find_stock_code(query, stock_df)
+                    if not (code.isdigit() and len(code) == 6):
+                        from pykrx import stock as krx
+                        today_str = end_date.strftime('%Y%m%d')
+                        all_codes = krx.get_market_ticker_list(today_str, market="ALL")
+                        matched = [(c, krx.get_market_ticker_name(c)) for c in all_codes
+                                   if query in krx.get_market_ticker_name(c)]
+                        if matched:
+                            code, name = matched[0]
+                        else:
+                            st.error(f"'{query}' 종목을 찾을 수 없습니다.\n\n"
+                                     "6자리 종목코드를 직접 입력해보세요.")
+                            st.stop()
                     df_s = load_price_data(code, fetch_start.strftime('%Y-%m-%d'),
                                            end_date.strftime('%Y-%m-%d'))
                     sig_title = f"{name} ({code})"
