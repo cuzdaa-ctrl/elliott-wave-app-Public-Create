@@ -1,0 +1,8 @@
+finance-datareader>=0.9.50
+streamlit>=1.35.0
+plotly>=5.20.0
+pandas>=2.0.0
+numpy>=1.26.0
+requests>=2.31.0
+pykrx>=1.0.35
+yfinance>=0.2.40
